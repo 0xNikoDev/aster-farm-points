@@ -1,15 +1,13 @@
-import requests
+import aiohttp
 import hmac
 import hashlib
 import time
 from typing import Dict, Any, Optional
 from dataclasses import dataclass
-from decimal import Decimal
 
 
 @dataclass
 class SymbolInfo:
-    """Symbol trading information"""
     tick_size: float
     step_size: float
     min_qty: float
@@ -17,7 +15,6 @@ class SymbolInfo:
 
 
 class AsterApiClient:
-    """Client for interacting with Aster DEX API"""
 
     def __init__(self, api_key: str, secret_key: str, base_url: str, timeout: int = 30):
         self.api_key = api_key
@@ -25,11 +22,17 @@ class AsterApiClient:
         self.base_url = base_url
         self.timeout = timeout
         self.headers = {"X-MBX-APIKEY": self.api_key}
-        self.session = requests.Session()
-        self.session.headers.update(self.headers)
+        self.session: Optional[aiohttp.ClientSession] = None
+
+    async def __aenter__(self):
+        self.session = aiohttp.ClientSession(headers=self.headers)
+        return self
+
+    async def __aexit__(self, exc_type, exc_val, exc_tb):
+        if self.session:
+            await self.session.close()
 
     def _create_signature(self, params: Dict[str, Any]) -> str:
-        """Create HMAC SHA256 signature for request"""
         query_string = '&'.join([f"{k}={v}" for k, v in params.items()])
         return hmac.new(
             self.secret_key.encode('utf-8'),
@@ -37,9 +40,11 @@ class AsterApiClient:
             hashlib.sha256
         ).hexdigest()
 
-    def _make_request(self, method: str, endpoint: str, params: Optional[Dict] = None,
-                     signed: bool = False) -> Dict[str, Any]:
-        """Make HTTP request to API"""
+    async def _make_request(self, method: str, endpoint: str, params: Optional[Dict] = None,
+                           signed: bool = False) -> Dict[str, Any]:
+        if self.session is None:
+            self.session = aiohttp.ClientSession(headers=self.headers)
+
         url = f"{self.base_url}{endpoint}"
 
         if params is None:
@@ -50,27 +55,31 @@ class AsterApiClient:
             params['signature'] = self._create_signature(params)
 
         try:
+            timeout = aiohttp.ClientTimeout(total=self.timeout)
+
             if method == 'GET':
-                response = self.session.get(url, params=params, timeout=self.timeout)
+                async with self.session.get(url, params=params, timeout=timeout) as response:
+                    response.raise_for_status()
+                    return await response.json()
             elif method == 'POST':
-                response = self.session.post(url, params=params, timeout=self.timeout)
+                async with self.session.post(url, params=params, timeout=timeout) as response:
+                    response.raise_for_status()
+                    return await response.json()
             elif method == 'DELETE':
-                response = self.session.delete(url, params=params, timeout=self.timeout)
+                async with self.session.delete(url, params=params, timeout=timeout) as response:
+                    response.raise_for_status()
+                    return await response.json()
             else:
                 raise ValueError(f"Unsupported HTTP method: {method}")
 
-            response.raise_for_status()
-            return response.json()
-        except requests.exceptions.RequestException as e:
+        except aiohttp.ClientError as e:
             raise Exception(f"API request failed: {str(e)}")
 
-    def get_exchange_info(self) -> Dict[str, Any]:
-        """Get exchange trading rules and symbol information"""
-        return self._make_request('GET', '/fapi/v1/exchangeInfo')
+    async def get_exchange_info(self) -> Dict[str, Any]:
+        return await self._make_request('GET', '/fapi/v1/exchangeInfo')
 
-    def get_symbol_info(self, symbol: str) -> Optional[SymbolInfo]:
-        """Get trading parameters for a specific symbol"""
-        exchange_info = self.get_exchange_info()
+    async def get_symbol_info(self, symbol: str) -> Optional[SymbolInfo]:
+        exchange_info = await self.get_exchange_info()
 
         for s in exchange_info.get('symbols', []):
             if s['symbol'] == symbol:
@@ -88,29 +97,24 @@ class AsterApiClient:
                     return SymbolInfo(**filters)
         return None
 
-    def get_orderbook(self, symbol: str, limit: int = 5) -> Dict[str, Any]:
-        """Get order book depth for a symbol"""
+    async def get_orderbook(self, symbol: str, limit: int = 5) -> Dict[str, Any]:
         params = {"symbol": symbol, "limit": limit}
-        return self._make_request('GET', '/fapi/v1/depth', params)
+        return await self._make_request('GET', '/fapi/v1/depth', params)
 
-    def check_hedge_mode(self) -> bool:
-        """Check if hedge mode is enabled"""
-        result = self._make_request('GET', '/fapi/v1/positionSide/dual', signed=True)
+    async def check_hedge_mode(self) -> bool:
+        result = await self._make_request('GET', '/fapi/v1/positionSide/dual', signed=True)
         return result.get('dualSidePosition', False)
 
-    def set_hedge_mode(self, enabled: bool) -> Dict[str, Any]:
-        """Enable or disable hedge mode"""
+    async def set_hedge_mode(self, enabled: bool) -> Dict[str, Any]:
         params = {"dualSidePosition": str(enabled).lower()}
-        return self._make_request('POST', '/fapi/v1/positionSide/dual', params, signed=True)
+        return await self._make_request('POST', '/fapi/v1/positionSide/dual', params, signed=True)
 
-    def set_leverage(self, symbol: str, leverage: int) -> Dict[str, Any]:
-        """Set leverage for a symbol"""
+    async def set_leverage(self, symbol: str, leverage: int) -> Dict[str, Any]:
         params = {"symbol": symbol, "leverage": leverage}
-        return self._make_request('POST', '/fapi/v1/leverage', params, signed=True)
+        return await self._make_request('POST', '/fapi/v1/leverage', params, signed=True)
 
-    def place_order(self, symbol: str, side: str, position_side: str,
-                   order_type: str, quantity: float) -> Dict[str, Any]:
-        """Place a new order"""
+    async def place_order(self, symbol: str, side: str, position_side: str,
+                         order_type: str, quantity: float) -> Dict[str, Any]:
         params = {
             "symbol": symbol,
             "side": side,
@@ -118,19 +122,17 @@ class AsterApiClient:
             "type": order_type,
             "quantity": quantity
         }
-        return self._make_request('POST', '/fapi/v1/order', params, signed=True)
+        return await self._make_request('POST', '/fapi/v1/order', params, signed=True)
 
-    def get_position_risk(self, symbol: Optional[str] = None) -> Dict[str, Any]:
-        """Get current position information"""
+    async def get_position_risk(self, symbol: Optional[str] = None) -> Dict[str, Any]:
         params = {}
         if symbol:
             params['symbol'] = symbol
-        return self._make_request('GET', '/fapi/v2/positionRisk', params, signed=True)
+        return await self._make_request('GET', '/fapi/v2/positionRisk', params, signed=True)
 
-    def get_account_balance(self) -> Dict[str, Any]:
-        """Get account balance information"""
-        return self._make_request('GET', '/fapi/v2/balance', signed=True)
+    async def get_account_balance(self) -> Dict[str, Any]:
+        return await self._make_request('GET', '/fapi/v2/balance', signed=True)
 
-    def close(self):
-        """Close the session"""
-        self.session.close()
+    async def close(self):
+        if self.session:
+            await self.session.close()
