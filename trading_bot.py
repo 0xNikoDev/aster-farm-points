@@ -43,7 +43,7 @@ class TradingBot:
         mid_price = (best_bid + best_ask) / 2
         return best_bid, best_ask, mid_price
 
-    async def open_hedged_positions(self, symbol: str, leverage: int) -> List[Dict[str, Any]]:
+    async def open_hedged_positions(self, symbol: str, leverage: int) -> Dict[str, Any]:
         usdt_balance = await self.get_usdt_balance()
         if usdt_balance == 0:
             raise Exception("No USDT balance available")
@@ -58,24 +58,52 @@ class TradingBot:
         )
 
         try:
-            long_result = await self.api_client.place_order(
-                symbol=symbol,
-                side="BUY",
-                position_side="LONG",
-                order_type="MARKET",
-                quantity=quantity
-            )
+            open_long_first = random.choice([True, False])
 
-            short_result = await self.api_client.place_order(
-                symbol=symbol,
-                side="SELL",
-                position_side="SHORT",
-                order_type="MARKET",
-                quantity=quantity
-            )
+            if open_long_first:
+                long_result = await self.api_client.place_order(
+                    symbol=symbol,
+                    side="BUY",
+                    position_side="LONG",
+                    order_type="MARKET",
+                    quantity=quantity
+                )
+                long_price = float(long_result.get('avgPrice', mid_price))
 
-            print(f"✅ Opened: LONG+SHORT {quantity} {symbol} @ {mid_price:.4f}")
-            return [{"side": "LONG", "result": long_result}, {"side": "SHORT", "result": short_result}]
+                short_result = await self.api_client.place_order(
+                    symbol=symbol,
+                    side="SELL",
+                    position_side="SHORT",
+                    order_type="MARKET",
+                    quantity=quantity
+                )
+                short_price = float(short_result.get('avgPrice', mid_price))
+
+                print(f"✅ Opened: LONG {quantity} @ {long_price:.4f} "
+                      f"→ SHORT {quantity} @ {short_price:.4f} | {symbol}")
+            else:
+                short_result = await self.api_client.place_order(
+                    symbol=symbol,
+                    side="SELL",
+                    position_side="SHORT",
+                    order_type="MARKET",
+                    quantity=quantity
+                )
+                short_price = float(short_result.get('avgPrice', mid_price))
+
+                long_result = await self.api_client.place_order(
+                    symbol=symbol,
+                    side="BUY",
+                    position_side="LONG",
+                    order_type="MARKET",
+                    quantity=quantity
+                )
+                long_price = float(long_result.get('avgPrice', mid_price))
+
+                print(f"✅ Opened: SHORT {quantity} @ {short_price:.4f} "
+                      f"→ LONG {quantity} @ {long_price:.4f} | {symbol}")
+
+            return {'quantity': quantity, 'long_price': long_price, 'short_price': short_price}
 
         except Exception as e:
             print(f"❌ Error opening positions: {e}")
@@ -84,26 +112,14 @@ class TradingBot:
 
     async def check_positions_status(self, symbol: str) -> Dict[str, Any]:
         positions = await self.api_client.get_position_risk(symbol)
-        position_summary = {
-            "symbol": symbol,
-            "positions": [],
-            "total_pnl": 0.0
-        }
+        total_pnl = 0.0
 
         for pos in positions:
             if isinstance(pos, dict) and float(pos.get('positionAmt', 0)) != 0:
                 pnl = float(pos.get('unRealizedProfit', 0))
-                position_summary["total_pnl"] += pnl
+                total_pnl += pnl
 
-                position_info = {
-                    "side": pos.get('positionSide'),
-                    "amount": pos.get('positionAmt'),
-                    "entry_price": pos.get('entryPrice'),
-                    "unrealized_pnl": pnl
-                }
-                position_summary["positions"].append(position_info)
-
-        return position_summary
+        return {"total_pnl": total_pnl}
 
     async def get_usdt_balance(self) -> float:
         balances = await self.api_client.get_account_balance()
@@ -128,7 +144,6 @@ class TradingBot:
                             order_type="MARKET",
                             quantity=abs(pos_amt)
                         )
-                        await asyncio.sleep(0.3)
             if not silent:
                 print("✓ Positions closed")
         except Exception as e:
@@ -156,6 +171,8 @@ class VolumeTradingBot:
             return False
 
         try:
+            balance_before = await self.base_bot.get_usdt_balance()
+
             # open positions
             await self.base_bot.open_hedged_positions(symbol, leverage)
 
@@ -180,14 +197,16 @@ class VolumeTradingBot:
             await self.base_bot.close_positions(symbol)
 
             await asyncio.sleep(1)
-            final_status = await self.base_bot.check_positions_status(symbol)
-            cycle_pnl = final_status['total_pnl']
+            balance_after = await self.base_bot.get_usdt_balance()
+            cycle_pnl = balance_after - balance_before
 
             self.total_pnl += cycle_pnl
             self.cycles_completed += 1
 
-            pnl_emoji = "✅" if cycle_pnl >= 0 else "❌"
-            print(f"{pnl_emoji} Closed: Cycle #{self.cycles_completed} | PnL: {cycle_pnl:.4f} | Total: {self.total_pnl:.4f} USDT")
+            if cycle_pnl < 0:
+                print(f"❌ Loss: Cycle #{self.cycles_completed} | Loss: {abs(cycle_pnl):.4f} USDT | Total PnL: {self.total_pnl:.4f} USDT")
+            else:
+                print(f"✅ Profit: Cycle #{self.cycles_completed} | Profit: {cycle_pnl:.4f} USDT | Total PnL: {self.total_pnl:.4f} USDT")
 
             if abs(self.total_pnl) >= self.max_loss_usdt:
                 return False
