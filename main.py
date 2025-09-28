@@ -5,29 +5,14 @@ from api_client import AsterApiClient
 from trading_bot import TradingBot, PositionCalculator, VolumeTradingBot
 
 
-async def run_single_pair_mode(config: Config, api_client: AsterApiClient):
-    print(f"\nTrading Mode: {config.trading.trading_mode}")
-    print(f"Symbol: {config.trading.symbol}")
-    print(f"Leverage: {config.trading.leverage}x")
-    print(f"Liquidity Multiplier: {config.trading.liquidity_multiplier}")
-    print(f"Balance Percentage: {config.trading.balance_percentage}%")
-
-    calculator = PositionCalculator(
-        liquidity_multiplier=config.trading.liquidity_multiplier,
-        balance_percentage=config.trading.balance_percentage
-    )
-
-    bot = TradingBot(api_client, calculator)
-
-    await bot.check_account_balance()
+async def run_single_pair_mode(config: Config, bot: TradingBot):
+    print(f"\nSingle Pair Mode: {config.trading.symbol} | Leverage: {config.trading.leverage}x")
 
     await bot.setup_trading_environment(
         symbol=config.trading.symbol,
         leverage=config.trading.leverage,
         hedge_mode=config.trading.hedge_mode
     )
-
-    await asyncio.sleep(1)
 
     positions = await bot.open_hedged_positions(
         config.trading.symbol,
@@ -36,32 +21,13 @@ async def run_single_pair_mode(config: Config, api_client: AsterApiClient):
 
     if positions:
         print("\n✓ Positions opened successfully")
-        print("Waiting 5 seconds before checking status...")
-        await asyncio.sleep(5)
-
-        position_status = await bot.check_positions_status(config.trading.symbol)
-
-        print("\n" + "=" * 50)
-        print("Bot is running. Positions are open.")
-        print("To close positions manually, stop the bot (Ctrl+C)")
-        print("=" * 50)
+        print("Press Ctrl+C to close positions and exit\n")
 
         while True:
             await asyncio.sleep(1)
 
 
-async def run_volume_trading_mode(config: Config, api_client: AsterApiClient):
-    print(f"\nVolume Trading Mode: ENABLED")
-    print(f"Symbol: {config.volume_trading.symbol}")
-    print(f"Leverage: {config.volume_trading.leverage}x")
-    print(f"Liquidity Multiplier: {config.volume_trading.liquidity_multiplier}")
-    print(f"Balance Percentage: {config.volume_trading.balance_percentage}%")
-
-    calculator = PositionCalculator(
-        liquidity_multiplier=config.volume_trading.liquidity_multiplier,
-        balance_percentage=config.volume_trading.balance_percentage
-    )
-
+async def run_volume_trading_mode(config: Config, calculator: PositionCalculator, api_client: AsterApiClient):
     volume_bot = VolumeTradingBot(
         api_client=api_client,
         calculator=calculator,
@@ -72,19 +38,17 @@ async def run_volume_trading_mode(config: Config, api_client: AsterApiClient):
         max_cycle_delay_sec=config.volume_trading.max_cycle_delay_sec
     )
 
-    await volume_bot.base_bot.check_account_balance()
-
     await volume_bot.start_volume_trading(
-        symbol=config.volume_trading.symbol,
-        leverage=config.volume_trading.leverage,
-        hedge_mode=True
+        symbol=config.trading.symbol,
+        leverage=config.trading.leverage,
+        hedge_mode=config.trading.hedge_mode
     )
 
 
 async def main_async():
-    print("=" * 50)
-    print("ASTER DEX POINTS FARMING BOT")
-    print("=" * 50)
+    print("ASTER DEX BOT")
+    config = None
+    api_client = None
 
     try:
         config = Config()
@@ -96,35 +60,30 @@ async def main_async():
             timeout=config.api.timeout
         )
 
-        if config.volume_trading.enabled:
-            await run_volume_trading_mode(config, api_client)
+        calculator = PositionCalculator(
+            liquidity_multiplier=config.trading.liquidity_multiplier,
+            balance_percentage=config.trading.balance_percentage
+        )
+
+        if config.trading.trading_mode == 'volume':
+            await run_volume_trading_mode(config, calculator, api_client)
         else:
-            await run_single_pair_mode(config, api_client)
+            bot = TradingBot(api_client, calculator)
+            await run_single_pair_mode(config, bot)
 
     except KeyboardInterrupt:
-        print("\n\nShutting down bot...")
-        sys.exit(0)
+        print("\n\nShutting down...")
+        if api_client and config:
+            bot = TradingBot(api_client, PositionCalculator())
+            await bot.close_positions(config.trading.symbol)
     except Exception as e:
         print(f"\n❌ Error: {e}")
-        print("Attempting to close all positions...")
-
-        try:
-            if 'api_client' in locals() and 'config' in locals():
-                if config.volume_trading.enabled:
-                    symbol = config.volume_trading.symbol
-                else:
-                    symbol = config.trading.symbol
-
-                calculator = PositionCalculator()
-                bot = TradingBot(api_client, calculator)
-                await bot._emergency_close_positions(symbol)
-                print("Emergency close completed")
-        except Exception as close_error:
-            print(f"Failed to close positions: {close_error}")
-
+        if api_client and config:
+            bot = TradingBot(api_client, PositionCalculator())
+            await bot.close_positions(config.trading.symbol)
         sys.exit(1)
     finally:
-        if 'api_client' in locals():
+        if api_client:
             await api_client.close()
 
 

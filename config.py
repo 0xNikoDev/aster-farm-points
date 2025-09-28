@@ -31,11 +31,6 @@ class TradingConfig:
 @dataclass
 class VolumeTradingConfig:
     """Volume trading mode configuration settings"""
-    enabled: bool
-    symbol: str
-    leverage: int
-    balance_percentage: float
-    liquidity_multiplier: float
     min_close_time_sec: int
     max_close_time_sec: int
     max_loss_usdt: float
@@ -80,11 +75,6 @@ class Config:
     def _load_volume_trading_config() -> VolumeTradingConfig:
         """Load volume trading configuration from environment variables"""
         return VolumeTradingConfig(
-            enabled=os.getenv('VOLUME_TRADING_MODE', 'false').lower() == 'true',
-            symbol=os.getenv('VOLUME_SYMBOL', 'BNBUSDT'),
-            leverage=int(os.getenv('VOLUME_LEVERAGE', '50')),
-            balance_percentage=float(os.getenv('VOLUME_BALANCE_PERCENTAGE', '80')),
-            liquidity_multiplier=float(os.getenv('VOLUME_LIQUIDITY_MULTIPLIER', '1.2')),
             min_close_time_sec=int(os.getenv('MIN_CLOSE_TIME_SEC', '30')),
             max_close_time_sec=int(os.getenv('MAX_CLOSE_TIME_SEC', '300')),
             max_loss_usdt=float(os.getenv('MAX_LOSS_USDT', '10')),
@@ -106,19 +96,10 @@ class Config:
         if self.trading.balance_percentage < 1 or self.trading.balance_percentage > 100:
             raise ValueError("Balance percentage must be between 1 and 100")
 
-        if self.trading.trading_mode not in ['single_pair']:
-            raise ValueError("Invalid trading mode. Currently only 'single_pair' is supported")
+        if self.trading.trading_mode not in ['single_pair', 'volume']:
+            raise ValueError("Invalid trading mode. Supported modes: 'single_pair', 'volume'")
 
-        if self.volume_trading.enabled:
-            if self.volume_trading.leverage < 1 or self.volume_trading.leverage > 100:
-                raise ValueError("Volume trading leverage must be between 1 and 100")
-
-            if self.volume_trading.liquidity_multiplier < 1.0:
-                raise ValueError("Volume trading liquidity multiplier must be at least 1.0")
-
-            if self.volume_trading.balance_percentage < 1 or self.volume_trading.balance_percentage > 100:
-                raise ValueError("Volume trading balance percentage must be between 1 and 100")
-
+        if self.trading.trading_mode == 'volume':
             if self.volume_trading.min_close_time_sec < 1:
                 raise ValueError("MIN_CLOSE_TIME_SEC must be at least 1 second")
 
