@@ -154,13 +154,14 @@ class DualAccountBot:
             if await self._check_deviation(positions2, position2_info, position2_margin, "Account 2"):
                 return True
 
-            # Check combined PnL
-            combined_pnl = sum(p['unrealized_pnl'] for p in positions1) + \
-                          sum(p['unrealized_pnl'] for p in positions2)
+            # Check combined PnL only after minimum hold time
+            if elapsed >= self.min_hold_time_sec:
+                combined_pnl = sum(p['unrealized_pnl'] for p in positions1) + \
+                              sum(p['unrealized_pnl'] for p in positions2)
 
-            if combined_pnl > 0:
-                print(f"✅ Positive PnL detected: {combined_pnl:.4f} USDT - Closing positions")
-                return True
+                if combined_pnl > 0:
+                    print(f"✅ Positive PnL detected: {combined_pnl:.4f} USDT (after {elapsed:.0f}s) - Closing positions")
+                    return True
 
             if elapsed >= hold_time:
                 print(f"⏱️ Hold time reached ({hold_time}s) - Closing positions")
