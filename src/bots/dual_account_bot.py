@@ -33,6 +33,30 @@ class DualAccountBot:
             self.bot2.setup_trading_environment(symbol, leverage, hedge_mode)
         )
 
+    @staticmethod
+    async def _open_market_position(bot: BaseTradingBot, symbol: str,
+                                    position_side: str, quantity: float,
+                                    account_name: str) -> Dict[str, Any]:
+        """Helper method to open a market position"""
+        side = "BUY" if position_side == "LONG" else "SELL"
+
+        result = await bot.api_client.place_order(
+            symbol=symbol,
+            side=side,
+            position_side=position_side,
+            order_type="MARKET",
+            quantity=quantity
+        )
+
+        entry_price = float(result.get('avgPrice', 0))
+        print(f"✅ {account_name}: {position_side} {quantity} @ {entry_price:.4f} | {symbol}")
+
+        return {
+            'quantity': quantity,
+            'entry_price': entry_price,
+            'side': position_side
+        }
+
     async def open_opposite_positions(self, symbol: str, leverage: int) -> Tuple[Dict, Dict]:
         # Get balances from both accounts
         balance1 = await self.bot1.get_usdt_balance()
@@ -56,60 +80,26 @@ class DualAccountBot:
             symbol_info, mid_price, min_balance, leverage, single_position=True
         )
 
+        # Randomly decide which account gets LONG and which gets SHORT
         long_on_first = random.choice([True, False])
 
-        if long_on_first:
-            side1, side2 = "LONG", "SHORT"
-        else:
-            side1, side2 = "SHORT", "LONG"
-
         try:
-            # Open positions with the same quantity on both accounts
-            if side1 == "LONG":
-                result1 = await self.bot1.api_client.place_order(
-                    symbol=symbol,
-                    side="BUY",
-                    position_side="LONG",
-                    order_type="MARKET",
-                    quantity=quantity
+            if long_on_first:
+                # Account 1: LONG, Account 2: SHORT
+                position1_info = await self._open_market_position(
+                    self.bot1, symbol, "LONG", quantity, "Account 1"
                 )
-                entry_price1 = float(result1.get('avgPrice', mid_price))
-                position1_info = {'quantity': quantity, 'entry_price': entry_price1, 'side': 'LONG'}
-                print(f"✅ Account 1: LONG {quantity} @ {entry_price1:.4f} | {symbol}")
+                position2_info = await self._open_market_position(
+                    self.bot2, symbol, "SHORT", quantity, "Account 2"
+                )
             else:
-                result1 = await self.bot1.api_client.place_order(
-                    symbol=symbol,
-                    side="SELL",
-                    position_side="SHORT",
-                    order_type="MARKET",
-                    quantity=quantity
+                # Account 1: SHORT, Account 2: LONG
+                position1_info = await self._open_market_position(
+                    self.bot1, symbol, "SHORT", quantity, "Account 1"
                 )
-                entry_price1 = float(result1.get('avgPrice', mid_price))
-                position1_info = {'quantity': quantity, 'entry_price': entry_price1, 'side': 'SHORT'}
-                print(f"✅ Account 1: SHORT {quantity} @ {entry_price1:.4f} | {symbol}")
-
-            if side2 == "LONG":
-                result2 = await self.bot2.api_client.place_order(
-                    symbol=symbol,
-                    side="BUY",
-                    position_side="LONG",
-                    order_type="MARKET",
-                    quantity=quantity
+                position2_info = await self._open_market_position(
+                    self.bot2, symbol, "LONG", quantity, "Account 2"
                 )
-                entry_price2 = float(result2.get('avgPrice', mid_price))
-                position2_info = {'quantity': quantity, 'entry_price': entry_price2, 'side': 'LONG'}
-                print(f"✅ Account 2: LONG {quantity} @ {entry_price2:.4f} | {symbol}")
-            else:
-                result2 = await self.bot2.api_client.place_order(
-                    symbol=symbol,
-                    side="SELL",
-                    position_side="SHORT",
-                    order_type="MARKET",
-                    quantity=quantity
-                )
-                entry_price2 = float(result2.get('avgPrice', mid_price))
-                position2_info = {'quantity': quantity, 'entry_price': entry_price2, 'side': 'SHORT'}
-                print(f"✅ Account 2: SHORT {quantity} @ {entry_price2:.4f} | {symbol}")
 
             margin_per_position = (quantity * mid_price) / leverage
             print(f"💼 Margin per position: {margin_per_position:.2f} USDT")
@@ -128,12 +118,24 @@ class DualAccountBot:
         pnl = position.get('unrealized_pnl', 0)
         return abs(pnl / initial_margin) * 100
 
-    async def monitor_positions(self, symbol: str, position1_info: Dict, position2_info: Dict, leverage: int) -> bool:
+    async def _check_deviation(self, positions: list, position_info: Dict,
+                              initial_margin: float, account_name: str) -> bool:
+        """Check if position deviation exceeds threshold"""
+        for pos in positions:
+            if pos['side'] == position_info['side']:
+                deviation = await self.calculate_position_deviation(pos, initial_margin)
+                if deviation >= self.max_position_deviation_percent:
+                    print(f"⚠️ {account_name} deviation: {deviation:.2f}% - Closing positions")
+                    return True
+        return False
+
+    async def monitor_positions(self, symbol: str, position1_info: Dict,
+                               position2_info: Dict, leverage: int) -> bool:
         check_interval = 1
         hold_time = random.randint(self.min_hold_time_sec, self.max_hold_time_sec)
         start_time = asyncio.get_event_loop().time()
 
-        # Calculate actual leverage from position info
+        # Calculate margins
         position1_margin = position1_info['quantity'] * position1_info['entry_price'] / leverage
         position2_margin = position2_info['quantity'] * position2_info['entry_price'] / leverage
 
@@ -145,20 +147,14 @@ class DualAccountBot:
             if not positions1 or not positions2:
                 return True
 
-            for pos in positions1:
-                if pos['side'] == position1_info['side']:
-                    deviation1 = await self.calculate_position_deviation(pos, position1_margin)
-                    if deviation1 >= self.max_position_deviation_percent:
-                        print(f"⚠️ Account 1 deviation: {deviation1:.2f}% - Closing positions")
-                        return True
+            # Check deviations for both accounts
+            if await self._check_deviation(positions1, position1_info, position1_margin, "Account 1"):
+                return True
 
-            for pos in positions2:
-                if pos['side'] == position2_info['side']:
-                    deviation2 = await self.calculate_position_deviation(pos, position2_margin)
-                    if deviation2 >= self.max_position_deviation_percent:
-                        print(f"⚠️ Account 2 deviation: {deviation2:.2f}% - Closing positions")
-                        return True
+            if await self._check_deviation(positions2, position2_info, position2_margin, "Account 2"):
+                return True
 
+            # Check combined PnL
             combined_pnl = sum(p['unrealized_pnl'] for p in positions1) + \
                           sum(p['unrealized_pnl'] for p in positions2)
 
@@ -178,6 +174,18 @@ class DualAccountBot:
             self.bot2.close_positions(symbol, silent=True)
         )
         print("✓ All positions closed on both accounts")
+
+    def _print_cycle_result(self, cycle_pnl: float, account1_cycle_pnl: float,
+                           account2_cycle_pnl: float):
+        """Print cycle result with proper formatting"""
+        status = "✅ Profit" if cycle_pnl >= 0 else "❌ Loss"
+        print(f"{status}: Cycle #{self.cycles_completed}")
+        print(f"   Account 1: {account1_cycle_pnl:.4f} USDT | Account 2: {account2_cycle_pnl:.4f} USDT")
+
+        if cycle_pnl >= 0:
+            print(f"   Combined Profit: {cycle_pnl:.4f} USDT | Total PnL: {self.total_pnl:.4f} USDT")
+        else:
+            print(f"   Combined Loss: {abs(cycle_pnl):.4f} USDT | Total PnL: {self.total_pnl:.4f} USDT")
 
     async def run_dual_trading_cycle(self, symbol: str, leverage: int) -> bool:
         if abs(self.total_pnl) >= self.max_loss_usdt:
@@ -210,14 +218,7 @@ class DualAccountBot:
             self.total_pnl += cycle_pnl
             self.cycles_completed += 1
 
-            if cycle_pnl < 0:
-                print(f"❌ Loss: Cycle #{self.cycles_completed}")
-                print(f"   Account 1: {account1_cycle_pnl:.4f} USDT | Account 2: {account2_cycle_pnl:.4f} USDT")
-                print(f"   Combined Loss: {abs(cycle_pnl):.4f} USDT | Total PnL: {self.total_pnl:.4f} USDT")
-            else:
-                print(f"✅ Profit: Cycle #{self.cycles_completed}")
-                print(f"   Account 1: {account1_cycle_pnl:.4f} USDT | Account 2: {account2_cycle_pnl:.4f} USDT")
-                print(f"   Combined Profit: {cycle_pnl:.4f} USDT | Total PnL: {self.total_pnl:.4f} USDT")
+            self._print_cycle_result(cycle_pnl, account1_cycle_pnl, account2_cycle_pnl)
 
             if abs(self.total_pnl) >= self.max_loss_usdt:
                 return False
@@ -236,6 +237,7 @@ class DualAccountBot:
     async def start_dual_trading(self, symbol: str, leverage: int, hedge_mode: bool = False):
         print(f"\n▶️ Dual Account Trading: {symbol} | Leverage: {leverage}x")
         print(f"Max Deviation: {self.max_position_deviation_percent}% | Max Loss: {self.max_loss_usdt} USDT")
+        print(f"Hold time: {self.min_hold_time_sec}-{self.max_hold_time_sec}s")
         print(f"Delay between cycles: {self.min_cycle_delay_sec}-{self.max_cycle_delay_sec}s\n")
 
         await self.setup_both_accounts(symbol, leverage, hedge_mode)
